@@ -1,25 +1,23 @@
-# C:\develop\myllm\run_bridge.ps1
-$VENV_PYTHON = "C:\develop\myllm\venv\Scripts\python.exe"
+# run_bridge.ps1 (마스터 초기화: 유령 상태 해소 후 Launcher + Bridge 재구축)
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$VenvPython = Join-Path $ScriptDir "venv\Scripts\python.exe"
+if (Test-Path $VenvPython) { $VENV_PYTHON = $VenvPython } else { $VENV_PYTHON = (Get-Command python -ErrorAction SilentlyContinue).Source; if (-not $VENV_PYTHON) { $VENV_PYTHON = "py"; $PY_ARG = "-3" } }
+$AG_API = Join-Path $ScriptDir "ag_api_server.py"
+$BRIDGE = Join-Path $ScriptDir "bridge.py"
 
-# 1. API 서버(8045)가 꺼져 있다면 백그라운드에서 실행
-if (!(Get-NetTCPConnection -LocalPort 8045 -ErrorAction SilentlyContinue)) {
-    Write-Host "🌐 Antigravity Launcher 서버를 가동합니다..." -ForegroundColor Cyan
-    Start-Process $VENV_PYTHON -ArgumentList "C:\develop\myllm\ag_api_server.py" -WindowStyle Hidden
-    Start-Sleep -Seconds 3
-}
-else {
-    Write-Host "✅ Launcher 서버(8045)가 이미 대기 중입니다." -ForegroundColor Green
-}
+# 1. 모든 Python 프로세스 강제 종료 (브리지, API 서버 초기화로 유령/409 해소)
+taskkill /f /im python.exe /t 2>$null
+# 2. 유령 상태 Antigravity 강제 종료 (새로 뜰 수 있도록)
+taskkill /f /im Antigravity.exe /t 2>$null
+Write-Host "모든 관련 프로세스를 초기화했습니다. 환경을 재구축합니다..." -ForegroundColor Cyan
+Start-Sleep -Seconds 2
 
-# 2. 중복된 bridge.py 프로세스만 정밀 타격 (Antigravity는 제외)
-Write-Host "🧹 기존 브리지 프로세스 점검 및 청소 중..." -ForegroundColor Yellow
-$old_bridge = Get-CimInstance Win32_Process -Filter "Name = 'python.exe' and CommandLine like '%bridge.py%'"
-if ($old_bridge) {
-    Write-Host "⚠️ 기존 브리지(Python)만 종료하고 재시작합니다." -ForegroundColor Yellow
-    $old_bridge | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-    Start-Sleep -Seconds 1
-}
+# 3. API 서버(8045) 백그라운드 기동
+Write-Host "Antigravity Launcher 서버를 가동합니다..." -ForegroundColor Cyan
+$apiArgs = if ($PY_ARG) { @($PY_ARG, $AG_API) } else { @($AG_API) }
+Start-Process $VENV_PYTHON -ArgumentList $apiArgs -WindowStyle Hidden
+Start-Sleep -Seconds 2
 
-# 3. 텔레그램 브리지 실행
-Write-Host "🚀 MyLLM Telegram Vibe Bridge를 실행합니다..." -ForegroundColor Green
-& $VENV_PYTHON "C:\develop\myllm\bridge.py"
+# 4. 텔레그램 브리지 실행
+Write-Host "MyLLM Telegram Vibe Bridge를 실행합니다..." -ForegroundColor Green
+if ($PY_ARG) { & $VENV_PYTHON $PY_ARG $BRIDGE } else { & $VENV_PYTHON $BRIDGE }

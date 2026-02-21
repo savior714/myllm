@@ -13,6 +13,13 @@ venv/
 *.log
 bridge.log
 
+# UI 진단 덤프 (inspect_ag_ui_v2.py 출력)
+ag_ui_dump.txt
+
+# antigravity-awesome-skills (external, 873+ skills)
+.cursor/skills/*
+!.cursor/skills/savior714
+
 # OS
 .DS_Store
 Thumbs.db

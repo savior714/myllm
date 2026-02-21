@@ -2,23 +2,33 @@ import asyncio
 import os
 import httpx
 
-async def run_gemini_cli(prompt: str, gemini_exe: str, workspace_path: str, max_retries: int = 3):
-    """Gemini CLI를 호출하여 시스템 명령 및 분석을 수행합니다. 실패 시 재시도 로직 포함."""
+async def run_gemini_cli(
+    prompt: str,
+    gemini_exe: str,
+    workspace_path: str,
+    max_retries: int = 3,
+    stdin_input: str | bytes | None = None,
+):
+    """Gemini CLI 호출. stdin_input이 있으면 실패 로그 등 컨텍스트를 stdin으로 전달(reflect 지능 복구)."""
     env = os.environ.copy()
     env["PYTHONIOENCODING"] = "utf-8"
-        
+    inp: bytes | None = None
+    if stdin_input is not None:
+        inp = stdin_input.encode("utf-8") if isinstance(stdin_input, str) else stdin_input
+
     for attempt in range(max_retries):
         try:
             process = await asyncio.create_subprocess_exec(
-                'cmd.exe', '/c', gemini_exe, 
-                prompt, 
-                '--yolo', # 도구 실행 자동 승인
+                "cmd.exe", "/c", gemini_exe,
+                prompt,
+                "--yolo",
+                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=workspace_path,
-                env=env
+                env=env,
             )
-            stdout, stderr = await process.communicate()
+            stdout, stderr = await process.communicate(input=inp)
             
             try:
                 out = stdout.decode('utf-8')
@@ -62,6 +72,6 @@ async def run_ag_api(ag_manager_url: str, endpoint: str, data: dict = None):
                 return True, response.text
             return False, f"API 오류 ({response.status_code}): {response.text}"
         except httpx.ConnectError:
-            return False, "❌ Antigravity-Manager(8045)가 실행 중이지 않습니다. 서비스를 확인해 주세요."
+            return False, "Antigravity-Manager(8045)가 실행 중이지 않습니다. 런처 서버를 확인하세요. (python ag_api_server.py)"
         except Exception as e:
             return False, f"Antigravity 연결 실패: {str(e)}"

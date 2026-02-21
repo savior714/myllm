@@ -7,12 +7,12 @@ import logging
 from datetime import datetime
 
 class EvolutionManager:
-    def __init__(self, root_path=r"C:\develop\myllm"):
-        self.root_path = root_path
-        self.logic_file = os.path.join(root_path, "docs", "CRITICAL_LOGIC.md")
-        self.failure_log = os.path.join(root_path, "logs", "failure_db.json")
-        self.log_dir = os.path.join(root_path, "logs")
-        
+    def __init__(self, root_path: str | None = None):
+        self.root_path = root_path or os.path.dirname(os.path.abspath(__file__))
+        self.logic_file = os.path.join(self.root_path, "docs", "CRITICAL_LOGIC.md")
+        self.failure_log = os.path.join(self.root_path, "logs", "failure_db.json")
+        self.log_dir = os.path.join(self.root_path, "logs")
+
         # 로그 폴더가 없으면 생성
         if not os.path.exists(self.log_dir):
             os.makedirs(self.log_dir)
@@ -87,27 +87,33 @@ class EvolutionManager:
                 continue
         return False
 
-    def record_failure(self, error_type, message, context=""):
-        """실패 사례를 JSON 데이터베이스에 저장합니다."""
+    MAX_MESSAGE_LENGTH = 2000
+    MAX_ENTRIES = 50
+
+    def record_failure(self, error_type: str, message: str, context: str = "") -> None:
+        """실패 사례를 JSON에 저장. 메시지 길이·항목 수 상한으로 과적 방지."""
+        msg = str(message)
+        if len(msg) > self.MAX_MESSAGE_LENGTH:
+            msg = msg[: self.MAX_MESSAGE_LENGTH] + "\n...[truncated]"
+
         failure_data = {
             "vitals": self.check_vitals(),
             "error_type": error_type,
-            "message": message,
-            "context": context
+            "message": msg,
+            "context": context,
         }
-        
-        history = []
+
+        history: list = []
         if os.path.exists(self.failure_log):
             try:
-                with open(self.failure_log, "r", encoding='utf-8') as f:
+                with open(self.failure_log, "r", encoding="utf-8") as f:
                     history = json.load(f)
             except Exception:
                 history = []
-        
+
         history.append(failure_data)
-        # 최근 50개의 실패 사례만 유지 (용량 관리)
-        with open(self.failure_log, "w", encoding='utf-8') as f:
-            json.dump(history[-50:], f, indent=4, ensure_ascii=False)
+        with open(self.failure_log, "w", encoding="utf-8") as f:
+            json.dump(history[-self.MAX_ENTRIES :], f, indent=2, ensure_ascii=False)
         
         logging.info(f"실패 기록 완료: {error_type}")
 

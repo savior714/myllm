@@ -17,63 +17,113 @@ load_dotenv()
 # --- [설정 정보: .env 파일에서 로드] ---
 BOT_TOKEN = os.getenv('BOT_TOKEN')
 ALLOWED_CHAT_ID = int(os.getenv('ALLOWED_CHAT_ID', 0))
-WORKSPACE_PATH = os.getenv('DEFAULT_WORKSPACE_PATH', r"C:\Users\savio") 
+WORKSPACE_PATH = os.getenv('DEFAULT_WORKSPACE_PATH', r"C:\Users\savio")
 GEMINI_EXE = os.getenv('GEMINI_EXE_PATH', r"C:\gemini-cli\gemini.cmd")
 AG_MANAGER_URL = os.getenv('AG_MANAGER_URL', "http://127.0.0.1:8045/v1")
-AG_TOOLS_PS1 = os.path.join(os.getcwd(), "ag_tools.ps1")
-LOG_DIR = r"C:\develop\myllm\logs"
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+AG_TOOLS_PS1 = os.path.join(_script_dir, "ag_tools.ps1")
+LOG_DIR = os.path.join(_script_dir, "logs")
+AG_MISSION_PATH = os.path.join(_script_dir, "AG_MISSION.md")
+AG_MISSION_BODY = "README.md 내용을 읽고 현재 프로젝트 구조를 요약해서 텔레그램으로 보낼 준비를 해줘."
+CLIPBOARD_TRIGGER = "@agent AG_MISSION.md 파일을 읽고 작업을 시작해."
+DEVELOP_ROOT = os.getenv("AG_DEVELOP_ROOT", r"C:\develop")
+os.makedirs(LOG_DIR, exist_ok=True)
 
-# 자가 진화 초기화
+# 자가 진화 초기화 (재시작 시 failure_db 초기화로 과적 방지)
 evo = EvolutionManager()
+try:
+    with open(evo.failure_log, "w", encoding="utf-8") as f:
+        f.write("[]")
+except OSError:
+    pass
 
-# 로그 설정 (매 새 실행마다 기존 로그 비우기 / 5MB 로테이션)
+# 로그 설정: 재실행 시 bridge.log 초기화, 파일에는 WARNING 이상만 기록(과적 방지)
 log_file = os.path.join(LOG_DIR, "bridge.log")
 open(log_file, 'w', encoding='utf-8').close()
 
 rotating_handler = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=3, encoding='utf-8')
+rotating_handler.setLevel(logging.WARNING)
 rotating_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s'))
+
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.DEBUG)
 
 logging.basicConfig(
     level=logging.DEBUG,
-    handlers=[
-        rotating_handler,
-        logging.StreamHandler()
-    ]
+    handlers=[rotating_handler, console_handler]
 )
 
 # --- [핵심 기능: 실행 유틸리티] ---
+
+def _is_connection_error(e: Exception) -> bool:
+    err = str(e).lower()
+    return "8045" in err or "연결" in err or "connect" in err or "실행 중이지 않습니다" in err
+
 
 async def handle_error_and_evolve(update: Update, e: Exception, context_tag: str):
     """에러 발생 시 로그를 남기고 에이전트에게 자가 수정을 제안합니다."""
     error_msg = str(e)
     stack_trace = traceback.format_exc()
-    
-    # 텔레그램 제한(4096자)을 고려하여 최대 1000자까지만 출력하고 나머지는 생략
-    safe_error_msg = error_msg[:1000] + "..." if len(error_msg) > 1000 else error_msg
-    
-    # 1. 실패 기록 저장
+    # 메시지 길이 제한(텔레그램 4096자): 연결 실패 시 500자, 그 외 1000자
+    cap = 500 if _is_connection_error(e) else 1000
+    safe_error_msg = (error_msg[:cap] + "...") if len(error_msg) > cap else error_msg
+
     evo.record_failure("RUNTIME_ERROR", error_msg, context_tag)
     logging.error(f"[{context_tag}] {error_msg}\n{stack_trace}")
 
-    # 2. 사용자에게 알림 및 자가 진화 제안
-    await update.message.reply_text(
-        f"❌ **시스템 에러 감지**\n원인: `{safe_error_msg}`\n\n"
-        "🤖 **자가 진화 루프 가동:** 이 에러의 패턴을 분석하고 `CRITICAL_LOGIC.md`에 복구 로직을 추가할까요? "
-        "자가 수정을 원하신다면 `/ag reflect`를 입력해 주세요."
-    )
+    if _is_connection_error(e):
+        await update.message.reply_text(
+            f"**연결 실패**: `{safe_error_msg}`\n\n"
+            "런처 서버(8045)가 켜져 있는지 확인하세요. `/ag reflect`로 진단할 수 있습니다."
+        )
+    else:
+        await update.message.reply_text(
+            f"**시스템 에러 감지**\n원인: `{safe_error_msg}`\n\n"
+            "자가 수정을 원하시면 `/ag reflect`를 입력해 주세요."
+        )
     return True
 
+async def ensure_mission_and_clipboard() -> None:
+    """미션 파일을 생성하고 클립보드에 트리거 문구를 복사합니다. SendKeys 대신 사용자 Ctrl+V로 주입."""
+    try:
+        with open(AG_MISSION_PATH, "w", encoding="utf-8") as f:
+            f.write(AG_MISSION_BODY)
+    except OSError:
+        pass
+    try:
+        # PowerShell Set-Clipboard; 값 내 작은따옴표 이스케이프
+        val = CLIPBOARD_TRIGGER.replace("'", "''")
+        proc = await asyncio.create_subprocess_exec(
+            "powershell.exe", "-NoProfile", "-Command", f"Set-Clipboard -Value '{val}'",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        await proc.wait()
+    except (asyncio.CancelledError, OSError):
+        pass
+
+
 async def run_reflection():
-    """지난 실패를 분석하고 로직을 업데이트하는 회고 세션을 실행합니다."""
-    prompt = r"""
-    [SELF_REFLECTION_MODE]
-    너는 시니어 아키텍트다. C:\develop\myllm\logs\failure_db.json 파일을 분석해라.
-    1. 최근 발생한 에러 패턴(중복 실행, 포트 충돌, 타임아웃 등)을 찾아라.
-    2. 이를 방지하기 위한 개선안을 docs/CRITICAL_LOGIC.md에 추가해라.
-    3. 필요하다면 ag_tools.ps1 이나 bridge.py의 코드로 직접 수정해라.
-    수정이 완료되면 어떤 점을 개선했는지 요약해서 보고해라.
-    """
-    return await run_gemini_cli(prompt, GEMINI_EXE, WORKSPACE_PATH)
+    """지난 실패를 분석하고 로직을 업데이트하는 회고 세션. failure_db 내용을 stdin으로 전달해 지능 복구."""
+    path_failure_db = os.path.join(LOG_DIR, "failure_db.json")
+    context_data: str | None = None
+    try:
+        if os.path.exists(path_failure_db):
+            with open(path_failure_db, "r", encoding="utf-8") as f:
+                context_data = f.read()
+    except OSError:
+        pass
+    # 상대 경로만 사용해 Gemini CLI 워크스페이스 정책 내에서 접근하도록 유도.
+    prompt = """
+[SELF_REFLECTION_MODE]
+너는 시니어 아키텍트다. stdin으로 전달된 실패 로그를 분석해라. (없으면 이 프로젝트의 logs/failure_db.json 을 읽어라.)
+1. 최근 에러 패턴(중복 실행, 포트 충돌, 타임아웃, Tool execution denied 등)을 찾아라.
+2. 개선안을 docs/CRITICAL_LOGIC.md 에 추가해라.
+3. 필요 시 ag_tools.ps1, bridge.py 코드를 수정해라.
+반드시 이 프로젝트 루트 내의 파일만 접근해라. 수정 완료 후 개선 요약을 보고해라.
+"""
+    # 회고 대상 파일(failure_db, CRITICAL_LOGIC, bridge 등)이 있는 브리지 프로젝트 루트를 cwd로 사용.
+    return await run_gemini_cli(prompt, GEMINI_EXE, _script_dir, stdin_input=context_data)
 
 # --- [핸들러 설정] ---
 
@@ -86,7 +136,12 @@ async def ag_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         args = context.args
         if not args:
-            await update.message.reply_text("💡 **Antigravity 사용법:**\n/ag [질문] - 에이전트와 대화\n/ag load [경로] - 워크스페이스 로드\n/ag reflect - 자가 회고 및 최적화\n/ag status - 상태 확인")
+            await update.message.reply_text(
+                "**Antigravity 사용법:**\n"
+                "/ag [폴더명] - c:\\develop 아래 폴더를 워크스페이스로 AG 기동 (예: /ag myllm-1)\n"
+                "/ag go - 기본 경로로 기동\n"
+                "/ag load [경로] - 워크스페이스 로드\n/ag reflect - 자가 회고\n/ag status - 상태 확인"
+            )
             return
 
         sub_cmd = args[0].lower()
@@ -122,11 +177,11 @@ async def ag_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             
             await update.message.reply_text("⚠️ GUI는 기동되었으나 8045 포트 응답이 없습니다. 수동으로 Agent Manager 탭을 확인해 주세요.")
 
-        # 일반 에이전트 대화 및 자연어 작업 지시
+        # 일반 에이전트 대화 및 자연어 작업 지시 (미션 파일 + 클립보드 트리거)
         else:
-            # prompt = " ".join(args)  # Launcher Mode에서는 프롬프트를 API로 전달하지 않음
+            await ensure_mission_and_clipboard()
 
-            # 1. 먼저 API 서버(8045)가 살아있는지 조기 확인
+            # 1. API 서버(8045) 조기 확인
             is_ready, _ = await run_ag_api(AG_MANAGER_URL, "status")
             
             if not is_ready:
@@ -151,15 +206,38 @@ async def ag_command_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 await update.message.reply_text("🖥 **이미 실행 중인 에이전트 화면으로 전환합니다...**")
                 await asyncio.create_subprocess_exec('powershell.exe', '-File', AG_TOOLS_PS1, 'load', WORKSPACE_PATH)
 
-            # 3. Antigravity Manager API를 통해 실행 (단순 호출)
-            success, raw_res = await run_ag_api(AG_MANAGER_URL, "chat/completions", {
-                "messages": [{"role": "user", "content": "launch"}]
-            })
-            
+            # 2. 런처 API로 기동 (폴더명 있으면 c:\develop\<폴더명>을 시작점으로 전달)
+            launch_payload = {"messages": [{"role": "user", "content": "launch"}]}
+            if args and args[0] not in ("go",):
+                folder = args[0].replace("..", "").strip()
+                if folder:
+                    launch_payload["path"] = os.path.normpath(os.path.join(DEVELOP_ROOT, folder))
+            success, raw_res = await run_ag_api(AG_MANAGER_URL, "chat/completions", launch_payload)
+
             if success:
-                await update.message.reply_text("✅ **워크스페이스 로드 완료.** 에이전트 매니저 탭이 활성화되었습니다. 직접 입력을 통해 작업을 진행해 주세요.")
+                try:
+                    data = json.loads(raw_res)
+                    content = None
+                    if data.get("choices") and len(data["choices"]) > 0:
+                        content = data["choices"][0].get("message", {}).get("content")
+                    remote_injected = data.get("remote_injected", False)
+                    if content:
+                        msg = f"**완료.** {content}"
+                        if not remote_injected:
+                            msg += "\n\n클립보드에 지시문이 복사되어 있습니다. 창에서 **Ctrl+V** 후 **Enter**로 실행하세요."
+                        await update.message.reply_text(msg)
+                    else:
+                        await update.message.reply_text(
+                            "**Antigravity를 기동했습니다.**" if remote_injected else
+                            "**Antigravity를 기동했습니다.**\n\n클립보드에 지시문이 복사되어 있습니다. 창에서 **Ctrl+V** 후 **Enter**로 실행하세요."
+                        )
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    await update.message.reply_text("**Antigravity를 기동했습니다.**\n\n클립보드에 지시문이 복사되어 있습니다. 창에서 **Ctrl+V** 후 **Enter**로 실행하세요.")
             else:
-                await update.message.reply_text(f"❌ 실행 실패: {raw_res}")
+                await update.message.reply_text(
+                    f"실행 실패: {raw_res[:500]}\n\n"
+                    "런처 서버(8045)가 켜져 있는지 확인하세요. `/ag reflect`로 진단할 수 있습니다."
+                )
                 
     except Exception as e:
         await handle_error_and_evolve(update, e, "ag_command_handler")
@@ -191,14 +269,20 @@ async def default_message_handler(update: Update, context: ContextTypes.DEFAULT_
         await handle_error_and_evolve(update, e, "default_message_handler")
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """전역 에러 핸들러: 핸들러 내에서 잡히지 않은 모든 에러( Conflict 등)를 포착합니다."""
+    """전역 에러 핸들러: Conflict(409) 시 스스로 종료하여 run_bridge.ps1 재시작으로 재로그인 유도."""
     error_msg = str(context.error)
     evo.record_failure("GLOBAL_POLLING_ERROR", error_msg, "telegram_library_error")
-    logging.error(f"⚠️ 전역 에러 발생: {error_msg}")
+    logging.error(f"전역 에러 발생: {error_msg}")
+    if "Conflict" in error_msg or "409" in error_msg:
+        logging.warning("Telegram 409 Conflict 감지. 브리지 종료 후 run_bridge.ps1으로 재실행하세요.")
+        raise SystemExit(1)
 
 # --- [메인 실행부] ---
 
 if __name__ == '__main__':
+    if not BOT_TOKEN or not BOT_TOKEN.strip():
+        print("BOT_TOKEN not set. Create .env with BOT_TOKEN=your_telegram_bot_token from https://t.me/BotFather")
+        raise SystemExit(0)
     application = ApplicationBuilder().token(BOT_TOKEN).build()
     
     # 전역 에러 핸들러 등록
@@ -210,12 +294,12 @@ if __name__ == '__main__':
     # 일반 텍스트 핸들러 (Gemini CLI 전용)
     application.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), default_message_handler))
     
-    print(f"🚀 Bridge Online | Workspace: {WORKSPACE_PATH}")
+    print(f"Bridge Online | Workspace: {WORKSPACE_PATH}")
     
     # 런타임 충돌 체크 (자가 치유 보강)
     conflict, pid = evo.check_for_conflicts()
     if conflict:
-        logging.warning(f"⚠️ 중복 인스턴스 감지 (PID: {pid}). 시스템 클린업이 필요합니다.")
+        logging.warning(f"중복 인스턴스 감지 (PID: {pid}). 시스템 클린업이 필요합니다.")
         # run_bridge.ps1에서 이미 처리하겠지만, 직접 실행 시를 위한 가드
     
     application.run_polling()
