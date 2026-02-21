@@ -42,5 +42,17 @@
 4. **회고 주기 (`/ag reflect`)**: 사용자의 요청이나 정기 세션을 통해 실패 로그를 분석하고 복구 로직을 `CRITICAL_LOGIC.md`에 영구 기록한다.
 5. **백업 원칙**: 자가 수정 시 원본 파일의 백업(`.bak`)을 생성하여 복구 가능성을 유지함.
 
-### 7. 해결된 케이스 연구 (Resolved Case Studies)
-* (에이전트가 자가 회고 세션을 통해 여기에 스스로 내용을 추가하게 됩니다.)
+### 7. 장애 복구 및 충돌 관리 정책 (Self-Healing)
+
+#### [Telegram API Conflict (HTTP 409)]
+- **증상**: `telegram.error.Conflict` 발생 ( terminated by other getUpdates request )
+- **원인**: 이전 브리지 세션이 정상적으로 종료되지 않았거나, 동일 토큰으로 다중 인스턴스가 실행됨.
+- **처방**: `Get-CimInstance`를 통해 동일 명령행(`bridge.py`)을 가진 프로세스를 찾아 `Stop-Process`로 강제 종료 후 재시작.
+- **예방**: `run_bridge.ps1` 실행 시 항상 프리플라이트 체크(Cleanup)를 수행하도록 규정함.
+
+#### [System Vitals Check]
+- `EvolutionManager.check_vitals()`를 통해 주기적으로 포트 8045 및 프로세스 상태를 모니터링함.
+- `conflict_detected` 플래그가 참일 경우 자가 진화 루프(`reflect`)를 통해 자동 복구를 시도함.
+
+### 8. 해결된 케이스 연구 (Resolved Case Studies)
+* **[2026-02-21] Telegram 409 Conflict 해결**: 다중 인스턴스 충돌 시 자가 치유 부팅 시퀀스(`run_bridge.ps1`)와 `EvolutionManager`의 프로세스 검색을 통해 중복 실행을 자동으로 정리하도록 설계됨.
