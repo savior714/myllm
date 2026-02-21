@@ -1,0 +1,6 @@
+[fs]
+allowed_paths = [
+    "C:\\Users\\savio",
+    "C:\\obsidian",
+    "C:\\develop\\myllm"
+]
