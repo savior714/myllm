@@ -40,4 +40,9 @@ if ($action -eq "load") {
         Write-Error "❌ Antigravity 설치 경로를 찾을 수 없습니다: $AG_EXE"
     }
 }
+else {
+    Write-Host "💡 Antigravity 도구 사용법:" -ForegroundColor Cyan
+    Write-Host ".\ag_tools.ps1 -action load -path [경로] : 특정 경로로 에이전트 기동/활성화"
+    Write-Log "인자 없이 실행됨. 사용법 출력."
+}
 Write-Log "ag_tools.ps1 종료"

@@ -1,62 +1,55 @@
+# C:\develop\myllm\ag_api_server.py
 import uvicorn
-from fastapi import FastAPI, Body, Request
+from fastapi import FastAPI, Body
 from pydantic import BaseModel
 import subprocess
 import os
 import logging
+import psutil
 
-# 로그 설정 (C:\develop\myllm\logs\api_server.log)
-LOG_FILE = r"C:\develop\myllm\logs\api_server.log"
-logging.basicConfig(
-    filename=LOG_FILE,
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    encoding='utf-8'
-)
+app = FastAPI(title="Antigravity Launcher API")
 
-app = FastAPI(title="Antigravity Manager API Wrapper")
-
-# 모든 요청/응답 기록을 위한 미들웨어
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    logging.info(f"요청 수신: {request.method} {request.url}")
-    response = await call_next(request)
-    logging.info(f"응답 발신: 상태코드 {response.status_code}")
-    return response
-
-# 워크스페이스 및 실행 파일 경로 설정
+# 환경 설정 (비확장 변수 대신 직접 경로 사용 권장되나, %USERPROFILE% 유지)
 AG_EXE = os.path.expandvars(r"%USERPROFILE%\AppData\Local\Programs\Antigravity\Antigravity.exe")
 WORKSPACE_PATH = r"C:\develop\myllm"
 
 class ChatRequest(BaseModel):
     model: str = "antigravity-agent"
     messages: list
-    stream: bool = False
 
 @app.get("/v1/status")
 async def get_status():
-    """브리지가 서버의 생존 여부를 확인할 때 사용합니다."""
-    return {"status": "online", "message": "Antigravity API Wrapper is active and listening on port 8045."}
+    return {"status": "online", "mode": "launcher_only"}
 
 @app.post("/v1/chat/completions")
-async def handle_chat(payload: ChatRequest = Body(...)):
-    """텔레그램 명령을 받아 Antigravity GUI를 제어합니다."""
-    # messages 리스트가 비어있는지 확인하는 안전장치 추가
-    if not payload.messages:
-        return {"error": "No messages provided."}
-        
-    user_prompt = payload.messages[-1]["content"]
-    
-    # 1. Antigravity 실행
-    # --agent 플래그는 존재하지 않으므로 제거하고 워크스페이스 경로만 전달함
+async def handle_launch(payload: ChatRequest = Body(...)):
+    """
+    텔레그램 /ag 명령 시 Antigravity를 에이전트 모드로 실행만 합니다.
+    잘못된 프롬프트 주입 시도로 인한 파일 생성 부작용을 원천 차단합니다.
+    """
     try:
-        # Popen을 사용하여 비동기적으로 실행 (API 응답은 즉시 반환)
-        subprocess.Popen([AG_EXE, WORKSPACE_PATH])
+        # 이미 Antigravity가 실행 중인지 확인
+        is_running = any("Antigravity" in p.info['name'] for p in psutil.process_iter(['name']))
+        
+        if is_running:
+            # 이미 실행 중이면 추가 기동 없이 안내만 보냄
+            return {
+                "choices": [{
+                    "message": {
+                        "role": "assistant", 
+                        "content": "🖥 Antigravity가 이미 실행 중입니다. 작업 중인 화면을 확인해 주세요."
+                    }
+                }]
+            }
+
+        # --agent 플래그를 사용하여 에이전트 매니저 모드로 기동
+        # 주의: 사용자 EXE 경로 확인 결과 bin 폴더가 없으므로 루트 EXE 사용
+        subprocess.Popen([AG_EXE, "--agent", WORKSPACE_PATH])
         return {
             "choices": [{
                 "message": {
                     "role": "assistant", 
-                    "content": f"명령을 수신했습니다: '{user_prompt}'. Antigravity GUI(Agent Manager)에서 작업을 시작합니다."
+                    "content": "🚀 Antigravity 에이전트 매니저를 실행했습니다. PC 화면에서 작업을 이어가세요."
                 }
             }]
         }
@@ -64,5 +57,4 @@ async def handle_chat(payload: ChatRequest = Body(...)):
         return {"error": str(e)}
 
 if __name__ == "__main__":
-    # 127.0.0.1:8045 포트로 서버 기동
     uvicorn.run(app, host="127.0.0.1", port=8045)
